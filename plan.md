@@ -101,47 +101,166 @@ Build a modular TypeScript CLI that converts HTML snippets or local HTML files i
 ### Stage 2: Locator Generator Module
 **File**: `src/locator-generator.ts`
 
-**Objective**: Generate stable, semantic Playwright locators for each element with fallback strategies.
+**Objective**: Select the single best Playwright locator for each HTML element using element-type-appropriate strategies. Do not generate fallback locators; Stage 4 handles alternative locators during code generation.
+
+**Input Requirements**:
+- Receives `Element` objects from Stage 1 (extracted interactive elements)
+- Stage 2 determines element type internally by examining tag name, role attribute, and HTML attributes
+- Stage 2 has no external input about element classification; it classifies as needed
+
+**Locator Format Specification**:
+Stage 2 outputs **structured locator information** that Stage 4 will convert to Playwright API calls. The structure must unambiguously express which Playwright API to call and with what arguments.
+
+**Supported Playwright locator types** (what Stage 2 can generate):
+- `getByTestId(testid)` → map from `data-testid` attribute
+- `getByRole(role, { name })` → map from implicit or explicit role + accessible name
+- `getByLabel(text)` → map from associated `<label>` or `aria-label` for form inputs
+- `getByPlaceholder(text)` → map from `placeholder` attribute
+- `getByText(text)` → map from element text content
+- `locator(cssSelector)` → map from CSS selector (no XPath)
+
+Example outputs:
+- `{ api: 'getByTestId', args: ['submit'], ... }`
+- `{ api: 'getByRole', args: ['button', 'Submit'], ... }`
+- `{ api: 'getByLabel', args: ['Email'], ... }`
+- `{ api: 'getByPlaceholder', args: ['Enter name...'], ... }`
+- `{ api: 'getByText', args: ['Click me'], ... }`
+- `{ api: 'locator', args: ['#submitBtn'], ... }`
 
 **Key Components**:
-- `generateLocator(element: Element): LocatorStrategy`
-  - Implement priority-based locator selection
-  - Return primary locator and fallbacks
 
-**Locator Priority Order**:
-1. **Test ID**: `data-testid` attribute
-2. **Semantic Role + Text**: For buttons and links with text
-3. **Accessible Name**: Using dom-accessibility-api
-4. **ARIA Label**: `aria-label` attribute
-5. **Placeholder**: For inputs
-6. **CSS Selector**: Fallback (stable class/id-based)
+**`generateLocator(element: Element): LocatorInfo`**:
+- Determine element type (button, input, checkbox, select, link, role-based, or generic)
+- Apply element-type-appropriate strategy (see below)
+- Return the single best locator as structured data
+- Include confidence level and reasoning for transparency
+- Does NOT validate uniqueness (Playwright validates at runtime)
+- Does NOT generate fallbacks (deferred to Stage 4)
+
+**Locator Selection Algorithm**:
+
+**Step 1: Classify Element Type**
+Determine category by examining: tag name, role attribute, type attribute. Categories:
+- `button-like`: `<button>`, `<input type="button">`, or explicit `role="button"`
+- `input-like`: `<input type="text|email|password|number">` or `<textarea>`
+- `checkbox-like`: `<input type="checkbox">`
+- `radio-like`: `<input type="radio">`
+- `select-like`: `<select>`
+- `link-like`: `<a href="...">`
+- `role-based`: element with explicit role attribute (any role value)
+- `generic`: any other interactive element
+
+**Step 2: Apply Element-Type Strategy**
+
+**For button-like elements**:
+1. If `data-testid` exists (non-empty): return testid locator (HIGH)
+2. Else if element has non-empty, non-generic accessible text: return text locator (MEDIUM)
+3. Else if `aria-label` exists (non-empty): return aria-label as text locator (MEDIUM)
+4. Else: return CSS selector (LOW)
+
+**For input-like elements** (text, email, password, number inputs, textarea):
+1. If `data-testid` exists: return testid locator (HIGH)
+2. Else if element has associated `<label>` (via `for` attribute): return label locator using label text (MEDIUM)
+3. Else if `placeholder` exists (non-empty, non-generic): return placeholder locator (MEDIUM)
+4. Else if `aria-label` exists: return aria-label as text locator (MEDIUM)
+5. Else: return CSS selector (LOW)
+
+**For checkbox-like / radio-like elements**:
+1. If `data-testid` exists: return testid locator (HIGH)
+2. Else if element has associated `<label>`: return label locator (MEDIUM)
+3. Else if `aria-label` exists: return aria-label as text locator (MEDIUM)
+4. Else: return CSS selector (LOW)
+
+**For select-like elements**:
+1. If `data-testid` exists: return testid locator (HIGH)
+2. Else if element has associated `<label>`: return label locator (MEDIUM)
+3. Else if `aria-label` exists: return aria-label as text locator (MEDIUM)
+4. Else: return CSS selector (LOW)
+
+**For link-like elements** (`<a href="...">`):
+1. If `data-testid` exists: return testid locator (HIGH)
+2. Else if link text is non-empty and appears stable: return text locator (MEDIUM)
+3. Else if `aria-label` exists: return aria-label as text locator (MEDIUM)
+4. Else: return CSS selector (LOW)
+
+**For role-based elements** (any element with explicit `role` attribute):
+1. If `data-testid` exists: return testid locator (HIGH)
+2. Else if element has meaningful accessible name (non-generic): return role + name locator (HIGH)
+3. Else if `aria-label` exists: return aria-label as text locator (MEDIUM)
+4. Else: return CSS selector (LOW)
+
+**For generic elements**:
+1. If `data-testid` exists: return testid locator (HIGH)
+2. Else if `aria-label` exists: return aria-label as text locator (MEDIUM)
+3. Else: return CSS selector (LOW)
+
+**Text Evaluation Rules**:
+When considering text content (for buttons, links, or aria-label):
+- **Accept**: meaningful, multi-character text (e.g., "Submit", "Click here", "Learn more")
+- **Reject**: single characters, generic symbols (">>", "◄", "...", "•"), whitespace-only, or appears to be UI chrome
+- Trim and normalize whitespace; if empty after trimming, reject
+
+**CSS Selector Strategy** (when no semantic locator available):
+Generate a CSS selector using this priority:
+1. If element has stable ID (not matching dynamic patterns like `react-*`, `emotion-*`, `__*`, `sc-*`): use `#id`
+2. Else if element has intentional classes (not matching generated patterns): use tag + classes (e.g., `button.primary`)
+3. Else if element has unique attribute combination: use tag + attributes (e.g., `input[type="email"][name="address"]`)
+4. Else: use tag selector only (least specific, but acceptable in small scopes)
+5. Do not use position-based selectors (`:nth-child`, `:nth-of-type`) as they are fragile
+
+If no acceptable CSS selector can be generated, return CSS locator with simple tag selector and LOW confidence.
+
+**Special Handling**:
+
+**Associated Label Detection** (for form inputs):
+- Look for `<label for="elementId">` where elementId matches the element's `id` attribute
+- Extract the label text content (trimmed)
+- Use label text for `getByLabel()` locator
+
+**Accessible Name for Role Elements**:
+- For elements with explicit role (e.g., `role="button"`), compute accessible name from:
+  1. Element's `aria-label` attribute, or
+  2. Element's direct text content (trimmed), or
+  3. Text of associated `<label>` if applicable
+- If computed name is non-empty and not generic, use `getByRole(role, { name })`
+
+**Dynamic vs Static Content**:
+- Links with query parameters in href (e.g., `/page?id=123`) are treated as risky for href-based locators; skip href strategy
+- Very generic text like "Click", "Submit", "Button" without additional context are acceptable for buttons but risky for links; use with MEDIUM confidence
 
 **Key Types**:
 ```typescript
-interface LocatorStrategy {
-  primary: string;      // Playwright locator syntax (e.g., "getByTestId('submit')")
-  fallback?: string[];  // Alternative locators
-  element: {
-    tag: string;
-    text?: string;
-    attributes: Record<string, string>;
-  };
+interface LocatorInfo {
+  api: 'getByTestId' | 'getByRole' | 'getByLabel' | 'getByPlaceholder' | 'getByText' | 'locator';
+  args: string[];  // Arguments to pass to the Playwright API
+  // For getByRole: args = [role, name?] (name is optional)
+  // For others: args = [value]
+  
+  confidence: 'high' | 'medium' | 'low';
+  reasoning?: string;  // e.g., "Selected via data-testid attribute"
 }
 ```
 
 **Deliverables**:
-- Generate semantic locators
-- Provide fallback locators
-- Handle edge cases (no accessible name, dynamic content)
-- Stable identifier selection
+- Determine element type and apply appropriate locator strategy
+- Return the single best locator per element
+- Include confidence and reasoning for debugging
+- Generate CSS selectors as fallback when semantic locators unavailable
+- Handle edge cases: labels, empty/generic text, role elements
 
 **Tests**:
-- Generate test ID locators
-- Generate role-based locators
-- Generate text-based locators
-- Generate placeholder locators
-- Generate CSS fallback
-- Handle elements without accessible names
+- **Test ID Selection**: `data-testid` is selected when present (all element types)
+- **Button Elements**: text-only buttons, buttons with aria-label, buttons without identifiers
+- **Input Elements**: with labels, with placeholders, without labels, with aria-label
+- **Checkbox/Radio**: with labels, with aria-label, without identifiers
+- **Select Elements**: with labels, with aria-label, without identifiers
+- **Link Elements**: with stable text, with aria-label, without text
+- **Role Elements**: with meaningful accessible name, with aria-label, with text content
+- **CSS Selector Generation**: ID selection, class selection, attribute combinations, fallback tag selector
+- **Text Evaluation**: accept meaningful text, reject generic/empty/symbols
+- **Label Association**: correct label text extraction from `<label for="id">`
+- **Edge Cases**: nested elements, empty attributes, whitespace normalization, dynamic href patterns
+- **Confidence Levels**: verify correct confidence assigned to each strategy
 
 ---
 
