@@ -1,1 +1,1 @@
-console.log('Playwright Page Object Generator');
+console.log("Playwright Page Object Generator");

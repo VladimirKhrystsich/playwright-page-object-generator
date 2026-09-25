@@ -3,7 +3,7 @@
     "rootDir": "./src",
     "outDir": "./dist",
 
-    "module": "nodenext",
+    "module": "esnext",
     "target": "es2020",
     "lib": ["es2020"],
     "types": ["node"],
@@ -21,10 +21,7 @@
     "noFallthroughCasesInSwitch": true,
     "noPropertyAccessFromIndexSignature": true,
 
-    "verbatimModuleSyntax": true,
     "isolatedModules": true,
-    "noUncheckedSideEffectImports": true,
-    "moduleDetection": "force",
     "skipLibCheck": true
   },
   "include": ["src"],
