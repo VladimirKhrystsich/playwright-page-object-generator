@@ -396,48 +396,281 @@ interface ElementMetadata {
 ### Stage 4: Page Object Generator Module
 **File**: `src/page-object-generator.ts`
 
-**Objective**: Generate well-structured TypeScript Page Object classes from classified elements.
+**Objective**: Generate valid, compilable TypeScript Page Object classes from ElementMetadata. Translate locator strategies and interaction types into Playwright API calls and action methods.
+
+**Input Requirements**:
+- `className: string` - Must be valid PascalCase TypeScript class name (matches `/^[A-Z][a-zA-Z0-9]*$/`)
+- `elements: ElementMetadata[]` - Array of metadata from Stage 3 (may be empty)
+- Validates that all metadata is well-formed; throws descriptive errors on invalid input
 
 **Key Components**:
-- `generatePageObject(className: string, elements: ElementMetadata[]): string`
-  - Generate class definition with constructor
-  - Create getters for element locators
-  - Create action methods for interactions
-  - Include JSDoc comments
+
+**`generatePageObject(className: string, elements: ElementMetadata[]): string`**:
+- Validate className is valid PascalCase identifier
+- Validate each ElementMetadata has required fields (element, locatorInfo, id, interactionType)
+- Generate complete TypeScript source file as string
+- Return code ready for Stage 5 (formatter)
+- Output is syntactically valid TypeScript (but may have spacing/formatting issues - that's Stage 5's job)
+
+**Playwright API Call Generation**:
+For each element, generate the correct Playwright API call based on `locatorInfo.api`:
+
+- `getByTestId` → `this.page.getByTestId(testId)`
+  - Example: `this.page.getByTestId('submit-button')`
+  
+- `getByRole` → `this.page.getByRole(role, { name: accessibleName })`
+  - If name provided (args[1]): `this.page.getByRole('button', { name: 'Submit' })`
+  - If name not provided (only args[0]): `this.page.getByRole('button')`
+  
+- `getByLabel` → `this.page.getByLabel(labelText)`
+  - Example: `this.page.getByLabel('Email Address')`
+  
+- `getByPlaceholder` → `this.page.getByPlaceholder(placeholderText)`
+  - Example: `this.page.getByPlaceholder('Enter name...')`
+  
+- `getByText` → `this.page.getByText(text)`
+  - Example: `this.page.getByText('Submit Button')`
+  
+- `locator` (CSS) → `this.page.locator(cssSelector)`
+  - Example: `this.page.locator('#submit-button')`
+
+**String Escaping**:
+All string literals in generated code must be properly escaped to ensure valid TypeScript syntax:
+- Escape backslashes: `\` → `\\`
+- Escape single quotes: `'` → `\'`
+- Escape double quotes: `"` → `\"`
+- Escape newlines: `\n` → `\\n`
+- Escape carriage returns: `\r` → `\\r`
+- Escape tabs: `\t` → `\\t`
+
+Wrap generated strings in single quotes: `'${escapedText}'`
+
+**Property Getter Generation**:
+For each element, generate a getter that returns the Playwright locator:
+```typescript
+get [id]() {
+  return this.page.[apiCall];
+}
+```
+
+Example:
+```typescript
+get submitButton() {
+  return this.page.getByTestId('submit-button');
+}
+```
+
+**Action Method Generation**:
+For each element, generate one action method based on `interactionType`:
+
+**Method Naming Convention**: `[interactionType][PascalCase(id)]()`
+- `click` → `click[PascalCase(id)]()`
+- `fill` → `fill[PascalCase(id)](text: string)`
+- `check` → `check[PascalCase(id)](shouldCheck: boolean = true)`
+- `selectOption` → `selectOption[PascalCase(id)](label: string)`
+
+**Method Signatures** (exact signatures for each type):
+
+1. **click interaction**:
+   ```typescript
+   async click[Id](): Promise<void> {
+     await this.[id].click();
+   }
+   ```
+   - No parameters
+   - Always returns `Promise<void>`
+
+2. **fill interaction**:
+   ```typescript
+   async fill[Id](text: string): Promise<void> {
+     await this.[id].fill(text);
+   }
+   ```
+   - Required `text: string` parameter
+   - Always returns `Promise<void>`
+
+3. **check interaction**:
+   ```typescript
+   async check[Id](shouldCheck: boolean = true): Promise<void> {
+     if (shouldCheck) {
+       await this.[id].check();
+     } else {
+       await this.[id].uncheck();
+     }
+   }
+   ```
+   - Optional `shouldCheck` boolean parameter (default true)
+   - Handles both check and uncheck scenarios
+   - Always returns `Promise<void>`
+
+4. **selectOption interaction**:
+   ```typescript
+   async selectOption[Id](label: string): Promise<void> {
+     await this.[id].selectOption(label);
+   }
+   ```
+   - Required `label: string` parameter (option label to select)
+   - Always returns `Promise<void>`
+
+**Action Method Name Collision Handling**:
+- Generate method name: `[interactionType]` + `PascalCase(id)`
+- Global uniqueness check across all class members (getters + methods):
+  1. Collect all getter names from Stage 3 ids: [id1, id2, id3, ...] (already unique from Stage 3)
+  2. For each element in order, compute potential method name: [interaction][PascalCase(id)]
+  3. Check if method name collides with:
+     - Any getter name (from Stage 3), OR
+     - Any previously generated method name (from earlier elements)
+  4. If collision detected: append numeric suffix to method name (starting at 2)
+     - Example: If `clickSubmit` collides with getter name, generate `clickSubmit2`
+     - If `clickSubmit2` also collides, generate `clickSubmit3`
+  5. Continue until unique name found
+- Result: ALL class members (getters + methods) have unique names, ensuring valid TypeScript compilation
 
 **Generated Class Structure**:
 ```typescript
-export class PageObjectName {
+import { type Page } from '@playwright/test';
+
+export class [ClassName] {
   constructor(private page: Page) {}
 
-  // Locator getters
-  get submitButton() { 
-    return this.page.locator(...); 
+  // Locator getters (in source order from elements array)
+  get [id1]() {
+    return this.page.[apiCall1];
   }
 
-  // Action methods
-  async clickSubmit() { 
-    await this.submitButton.click(); 
+  get [id2]() {
+    return this.page.[apiCall2];
   }
 
-  async fillEmail(text: string) { 
-    await this.emailInput.fill(text); 
+  // Action methods (in source order, grouped by interaction type or by element order)
+  async [interaction1][Id1](params): Promise<void> {
+    // implementation
+  }
+
+  async [interaction2][Id2](params): Promise<void> {
+    // implementation
   }
 }
 ```
 
+**Input Validation**:
+Before code generation, validate all inputs:
+
+1. **Class Name Validation**:
+   - Must match `/^[A-Z][a-zA-Z0-9]*$/` (PascalCase)
+   - Throw: `Invalid class name: ${className}. Must be PascalCase (e.g., "HomePage")`
+
+2. **ElementMetadata Validation** (for each element):
+   - `id` must be valid TypeScript identifier: `/^[a-zA-Z_$][a-zA-Z0-9_$]*$/`
+   - `interactionType` must be one of: `'click'`, `'fill'`, `'check'`, `'selectOption'`
+   - `locatorInfo.api` must be one of: `'getByTestId'`, `'getByRole'`, `'getByLabel'`, `'getByPlaceholder'`, `'getByText'`, `'locator'`
+   - `locatorInfo.args` must be non-empty array of strings
+   - If validation fails: `Invalid metadata for element [id]: [description]`
+
+3. **Throw on First Error**:
+   - Do not attempt to generate partial code
+   - Validation errors are fatal to code generation
+   - Return descriptive error message
+
+**Stage 4 vs Stage 5 Responsibility Split**:
+
+**Stage 4 generates** (code generation):
+- Valid TypeScript syntax
+- Correct Playwright API calls
+- Proper method signatures and implementations
+- Import/export statements
+- Simple indentation (2 spaces per level)
+- Single-line methods where possible
+- Minimal unnecessary whitespace
+
+**Stage 5 formats** (prettier application):
+- Line length optimization
+- Multi-line method formatting
+- Consistent spacing and alignment
+- Quote style consistency
+- Trailing commas
+- Code alignment preferences
+
+**Stage 4 Output Responsibility**:
+Stage 4 is responsible for generating complete, compilable TypeScript files. The output:
+- **Always includes**: `import { type Page } from '@playwright/test';`
+- **Always includes**: `export class [ClassName]`
+- **Always includes**: Constructor with `private page: Page` parameter
+- **Always includes**: All getters and action methods for elements
+- **Is compilable**: Valid TypeScript syntax (may require Stage 5 for readability)
+- **Is usable**: Can be imported and used immediately after Stage 5 formatting
+
+**Edge Cases**:
+
+**Empty Elements Array**:
+- Input: `className = 'HomePage'`, `elements = []`
+- Output:
+  ```typescript
+  import { type Page } from '@playwright/test';
+
+  export class HomePage {
+    constructor(private page: Page) {}
+  }
+  ```
+
+**Single Element**:
+- All code generation works the same
+- Output: Import, class def, constructor, 1 getter, 1 action method
+
+**Special Characters in Locator Args**:
+- All args are escaped before inclusion in generated code
+- Example: `args = ["Click 'now'"]` → `this.page.getByText('Click \'now\'');`
+
+**Very Long Class**:
+- No special handling; generate sequentially
+- Stage 5 (prettier) will format for readability
+- Order: getters first (in element order), then action methods (in element order)
+
 **Deliverables**:
-- Generate Page Object class skeleton
-- Create getter properties for locators
-- Create action methods
-- Include proper JSDoc documentation
-- Handle multiple interaction types
+- Generate valid, complete TypeScript Page Object classes
+- Produce code ready for Stage 5 formatting
+- Handle all 4 interaction types correctly
+- Validate input and throw on errors
+- Escape all string literals properly
+- Generate deterministic, consistent output
 
 **Tests**:
-- Generate valid TypeScript syntax
-- Create appropriate getters and methods
-- Include JSDoc comments
-- Handle multiple elements
+- **Valid TypeScript Generation**:
+  - Generate code with single element (each interaction type)
+  - Generate code with multiple elements
+  - Verify generated code passes TypeScript compilation (tsc --noEmit)
+
+- **API Call Correctness**:
+  - `getByTestId` generates correct call with testid
+  - `getByRole` generates correct call with role and optional name
+  - `getByLabel`, `getByPlaceholder`, `getByText` generate correct calls
+  - `locator` (CSS) generates correct CSS selector call
+
+- **Method Signature Correctness**:
+  - Click methods: no parameters, return Promise<void>
+  - Fill methods: require text: string parameter
+  - Check methods: optional shouldCheck: boolean = true parameter
+  - SelectOption methods: require label: string parameter
+
+- **String Escaping**:
+  - Locator args with quotes are escaped correctly
+  - Generated code compiles without syntax errors
+  - Escaped strings produce correct Playwright calls
+
+- **Input Validation**:
+  - Invalid className throws error
+  - Invalid metadata (bad id, unknown interactionType) throws error
+  - Validation happens before code generation
+
+- **Edge Cases**:
+  - Empty elements array generates minimal class
+  - Method name collisions handled with numeric suffixes
+  - All 4 interaction types in single class work correctly
+
+- **Determinism**:
+  - Same input always produces same output
+  - Element order preserved
+  - No non-deterministic behavior
 
 ---
 
