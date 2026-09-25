@@ -264,39 +264,132 @@ interface LocatorInfo {
 
 ---
 
-### Stage 3: Element Classifier Module
-**File**: `src/element-classifier.ts`
+### Stage 3: Element Metadata Extractor Module
+**File**: `src/element-metadata.ts`
 
-**Objective**: Classify elements and extract metadata for code generation.
+**Objective**: Extract metadata for code generation from elements and their locators. Translate Stage 2 locator information into code generation instructions.
+
+**Input Contract**:
+- Receives `Element` objects (from Stage 1)
+- Receives `LocatorInfo` objects (from Stage 2) in corresponding order
+- Stage 2 has already classified element types and generated locators; Stage 3 does not re-classify
 
 **Key Components**:
-- `classifyElement(element: Element, locator: LocatorStrategy): ElementMetadata`
-  - Determine element type and interaction pattern
-  - Extract relevant attributes and text
+
+**`extractElementMetadata(element: Element, locatorInfo: LocatorInfo): ElementMetadata`**:
+- Generate a stable camelCase property identifier from the locator information
+- Determine the interaction type based on the element's tag/type and role
+- Return complete metadata for Stage 4 code generation
+- All computations are deterministic and depend only on element and locator
+
+**Locator-to-Playwright-API Mapping**:
+Stage 4 will convert LocatorInfo into code. Stage 3's role is to provide metadata for method selection:
+- `getByTestId` → property getter, no suffix action method
+- `getByRole` → property getter, no suffix action method
+- `getByLabel`, `getByPlaceholder`, `getByText` → property getter, no suffix action method
+- `locator` (CSS) → property getter, no suffix action method
+
+All interactions are generated via action methods:
+- `click()` for button-like and role-based interactive elements
+- `fill()` for text inputs and textareas
+- `check()` for checkboxes and radios
+- `selectOption()` for selects
+- Navigation (link following) is optional; links can also be treated as clickable
+
+**Property Identifier Generation Algorithm**:
+
+1. Extract base name from locator (in priority order):
+   - If `api === 'getByTestId'`: use first arg directly
+   - If `api === 'getByRole'`: use second arg (name) if present, else use first arg (role)
+   - If `api === 'getByLabel'`: use first arg (label text)
+   - If `api === 'getByPlaceholder'`: use first arg (placeholder text)
+   - If `api === 'getByText'`: use first arg (text)
+   - If `api === 'locator'`: use element tag name
+
+2. Convert to camelCase:
+   - Remove leading/trailing whitespace
+   - Remove non-alphanumeric characters (keep only a-z, A-Z, 0-9)
+   - Convert to camelCase: first word lowercase, subsequent words capitalize first letter
+   - If starts with digit, prepend element tag name (e.g., `2` → `button2`)
+   - If empty after conversion, use element tag name (e.g., `button`, `input`, `select`)
+
+3. Ensure uniqueness:
+   - Collected across all elements
+   - On collision, append numeric suffix (starting at 2): `submit`, `submit2`, `submit3`
+   - This deduplication happens at the Stage 3 boundary (batch operation)
+
+4. Validation:
+   - Must be valid TypeScript identifier: `/^[a-zA-Z_$][a-zA-Z0-9_$]*$/`
+   - Must not be a reserved word: `button`, `return`, `this`, `class`, `constructor`, `prototype`, etc.
+   - If validation fails, use fallback: element tag name + auto-incremented counter
+
+**Interaction Type Mapping**:
+Based on element tag name / type attribute / role attribute (from the DOM element, not reconstructed):
+
+- `<button>`, `<input type="button">`, `role="button"` → 'click'
+- `<input type="text|email|password|number">`, `<textarea>` → 'fill'
+- `<input type="checkbox">` → 'check'
+- `<input type="radio">` → 'check'
+- `<select>` → 'selectOption'
+- `<a href="...">` → 'click' (navigates; treated as clickable)
+- Any element with `role="button"`, `role="link"` → 'click'
+- Any element with `role="tab"`, `role="menuitem"` → 'click'
+- Any element with `role="checkbox"`, `role="switch"` → 'check'
+- Any element with `role="option"`, `role="listbox"` → 'selectOption' (specialized; typically not extracted as top-level)
+- Fallback for unknown → 'click' (safest default)
 
 **Key Types**:
 ```typescript
 interface ElementMetadata {
-  id: string;                  // camelCase identifier (e.g., "submitButton")
-  displayName: string;         // Human-readable name
-  type: 'button' | 'input' | 'checkbox' | 'select' | 'link' | 'textarea';
-  locator: string;            // Primary Playwright locator
-  fallbackLocators?: string[];
-  interactionType: 'click' | 'fill' | 'check' | 'select' | 'navigate';
-  description?: string;        // Optional description for comments
+  element: Element;              // Reference to original element
+  locatorInfo: LocatorInfo;      // Stage 2 output (API + args + confidence)
+  id: string;                    // camelCase identifier for property and action methods
+  interactionType: 'click' | 'fill' | 'check' | 'selectOption';
 }
 ```
 
 **Deliverables**:
-- Classify interactive elements
-- Generate descriptive identifiers
-- Determine appropriate interaction methods
-- Extract relevant metadata
+- Generate valid, deterministic camelCase property identifiers from locator information
+- Map element tag/type/role to correct Playwright interaction method
+- Handle identifier collisions and validation
+- Provide complete metadata for Stage 4 code generation
+- No speculative metadata; only what Stage 4 actually needs
 
 **Tests**:
-- Classify buttons, inputs, checkboxes, selects, links
-- Generate valid camelCase identifiers
-- Map interaction types correctly
+- **Identifier Generation**:
+  - getByTestId("submit") → id: "submit"
+  - getByTestId("submit-button") → id: "submitButton"
+  - getByTestId("2fa-code") → id: "input2faCode" or "button2faCode" (depends on element tag)
+  - getByRole("button", "Click Me") → id: "clickMe"
+  - getByText("Learn More") → id: "learnMore"
+  - Placeholder("Enter name...") → id: "inputEnterName" or fallback tag name
+  - Empty/generic locator → id: element tag name (button, input, select, etc.)
+
+- **Collision Handling**:
+  - Two "submit" buttons → ids: "submit", "submit2"
+  - Collision in generated suffix → "submit", "submit2", "submit3" (not "submit2", "submit2_2")
+
+- **Interaction Type Mapping**:
+  - `<button>` → 'click'
+  - `<input type="text">` → 'fill'
+  - `<input type="checkbox">` → 'check'
+  - `<input type="radio">` → 'check'
+  - `<select>` → 'selectOption'
+  - `<a href="#">` → 'click'
+  - `<div role="button">` → 'click'
+  - `<div role="tab">` → 'click'
+  - `<span role="checkbox">` → 'check'
+
+- **Validation**:
+  - Reserved keywords are avoided or suffixed (e.g., "return" → "return2")
+  - Invalid characters are removed
+  - Empty identifiers fall back to tag name
+
+- **Edge Cases**:
+  - Element with no meaningful locator (fallback CSS) → use tag name
+  - Element with unicode text → sanitized to alphanumeric
+  - Very long identifiers → handled as-is (no truncation)
+  - Numbers in identifiers → handled correctly ("2fa" → "input2fa")
 
 ---
 
